@@ -123,7 +123,20 @@ export async function handle(request, env, kv) {
   const method = request.method.toUpperCase();
   try {
     const ready = !!env.SECRET && String(env.SECRET).length >= 16;
-    if (path === 'ping' && method === 'GET') return out(200, { ok: true, service: 'interchange', v: 1, ready });
+    if (path === 'ping' && method === 'GET') {
+      // 설정 점검용: 값은 절대 내보내지 않고, 이름과 있는지 여부만 알려 준다.
+      const n = env.SECRET == null ? 0 : String(env.SECRET).length;
+      const diag = {
+        build: 'diag-2',
+        secret: env.SECRET == null ? 'missing' : (n === 0 ? 'empty' : n < 16 ? 'short' : 'ok'),
+        secretType: typeof env.SECRET,
+        kv: !!(kv && typeof kv.get === 'function'),
+        devIds: !!env.DEV_IDS,
+        setupCode: !!env.DEV_SETUP_CODE,
+        names: Object.keys(env || {}).filter(k => /^[A-Za-z0-9_]{1,40}$/.test(k)).sort().slice(0, 20),
+      };
+      return out(200, { ok: true, service: 'interchange', v: 1, ready, diag });
+    }
     if (!ready) return out(500, { error: 'server_config', message: '서버 설정이 끝나지 않았습니다. SECRET 환경 변수(16자 이상)가 필요합니다.' });
 
     const authed = async () => {
@@ -283,6 +296,28 @@ export async function handle(request, env, kv) {
         const list = JSON.parse((await kv.get('fb')) || '[]').filter((x) => b.all === true ? false : x.t !== t);
         await kv.put('fb', JSON.stringify(list));
         return out(200, { ok: true, left: list.length });
+      }
+      // 서버 기록 백업: 한 번에 조금씩 나눠 내려받고(저장소의 요청 한도 때문), 같은 모양으로 되돌린다
+      if (path === 'dev/backup' && method === 'GET') {
+        if (typeof kv.list !== 'function') throw new HttpError(501, 'no_list', '이 저장소에서는 전체 내려받기를 지원하지 않습니다.');
+        const limit = Math.max(1, Math.min(40, Number(url.searchParams.get('limit')) || 20));
+        const r = await kv.list({ cursor: url.searchParams.get('cursor') || undefined, limit });
+        const keys = {};
+        for (const k of r.keys) { if (k.name.startsWith('rl:')) continue; const v = await kv.get(k.name); if (v != null) keys[k.name] = v; }
+        return out(200, { keys, cursor: r.list_complete ? '' : (r.cursor || '') });
+      }
+      if (path === 'dev/restore' && method === 'POST') {
+        if (!plainObject(b.keys)) throw new HttpError(400, 'bad_backup', '백업 내용의 모양이 맞지 않습니다.');
+        const names = Object.keys(b.keys);
+        if (names.length > 20) throw new HttpError(400, 'too_many', '한 번에 20건까지만 되돌릴 수 있습니다.');
+        let count = 0;
+        for (const name of names) {
+          const v = b.keys[name];
+          if (typeof v !== 'string' || v.length > MAX_EDITS) continue;
+          if (!/^(u|p):[^\s]{1,80}$/.test(name) && !['edits', 'devs', 'fb'].includes(name)) continue;
+          await kv.put(name, v); count++;
+        }
+        return out(200, { ok: true, count });
       }
       if (path === 'dev/list' && method === 'GET') {
         return out(200, { masters: devIds(env), devs: JSON.parse((await kv.get('devs')) || '[]') });
