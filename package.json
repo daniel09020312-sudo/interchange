@@ -1,0 +1,9 @@
+{
+  "name": "interchange-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/node.js",
+    "test": "node tests/api.test.mjs"
+  }
+}
